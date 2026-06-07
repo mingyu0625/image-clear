@@ -1,0 +1,15 @@
+name: Build Windows EXE  # 工作流名称，显示在GitHub Actions页面
+on: [push]  # 触发条件：只要推送代码就自动运行
+jobs:  # 定义任务块
+  build:  # 任务名称
+    runs-on: windows-latest  # 指定在GitHub提供的最新Windows服务器上运行
+    steps:  # 具体步骤列表
+      - uses: actions/checkout@v3  # 第一步：拉取你的代码仓库
+      - uses: actions/setup-python@v4  # 第二步：安装Python环境
+        with: {python-version: '3.10'}  # 指定Python版本为3.10，稳定兼容
+      - run: pip install -r requirements.txt pyinstaller  # 第三步：安装所有依赖和打包工具
+      - run: pyinstaller --onefile --windowed --name ImageCleaner main.py  # 第四步：打包成单文件EXE，隐藏控制台窗口
+      - uses: actions/upload-artifact@v3  # 第五步：把生成的EXE上传为可下载附件
+        with:  # 配置上传参数
+          name: ImageCleaner-win  # 附件包名称
+          path: dist/ImageCleaner.exe  # 指定要上传的文件路径
