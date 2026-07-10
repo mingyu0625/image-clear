@@ -1,94 +1,188 @@
-import os  # 导入系统模块，处理文件路径
-import cv2  # 导入OpenCV库，用来分析图片内容
-import imagehash  # 导入指纹库，生成图片唯一特征值
-from PIL import Image  # 导入Pillow库，处理图片缩放和格式
-import math  # 导入数学库，计算图片信息熵
-import sqlite3  # 导入数据库模块
-from concurrent.futures import ThreadPoolExecutor  # 导入多线程工具，加速扫描
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images.db")  # 数据库路径
-THUMB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumbs")  # 缩略图文件夹路径
-os.makedirs(THUMB_DIR, exist_ok=True)  # 创建缩略图文件夹，已存在就不报错
-def get_date_from_path(path):  # 从文件路径获取创建日期
-    try:  # 尝试执行
-        stat = os.stat(path)  # 获取文件属性
-        return str(stat.st_ctime)[:10]  # 提取创建时间的前10位，格式为YYYY-MM-DD
-    except:  # 如果获取失败
-        return "1970-01-01"  # 返回默认日期，防止程序崩溃
-def compute_hash(path):  # 计算图片指纹值
-    try:  # 尝试执行
-        img = Image.open(path).convert("L").resize((16, 16))  # 打开图片，转灰度，缩放到16x16像素
-        return str(imagehash.dhash(img))  # 生成dHash指纹并转成字符串
-    except:  # 如果图片损坏或格式不支持
-        return "null"  # 返回空值，标记为无效
-def is_invalid(path):  # 判断图片是否无效
-    try:  # 尝试分析
-        img = cv2.imread(path)  # 用OpenCV读取图片
-        if img is None: return "corrupted"  # 读不到就标记为损坏
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # 转成灰度图方便计算
-        if cv2.Laplacian(gray, cv2.CV_64F).var() < 80: return "blurry"  # 计算边缘方差，小于80说明太模糊
-        h, w = img.shape[:2]  # 获取图片高度和宽度
-        aspect = w / h  # 计算宽高比
-        if 1.75 < aspect < 1.85 or 0.53 < aspect < 0.57: return "screenshot"  # 符合常见截屏比例就标记为截屏
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])  # 计算灰度直方图
-        entropy = -sum((p/255.0)*math.log2(p/255.0) for p in hist if p > 0)  # 计算信息熵，值越低说明内容越单调
-        if entropy < 1.5: return "meaningless"  # 信息熵太低说明是纯色或无意义图
-    except:  # 分析过程中出错
-        return "corrupted"  # 统一标记为损坏
-    return "valid"  # 全部检查通过，标记为有效
-def generate_thumb(path, thumb_path):  # 生成缩略图函数
-    try:  # 尝试生成
-        img = Image.open(path).resize((200, 200), Image.LANCZOS)  # 打开原图，高质量缩放到200x200
-        img.save(thumb_path, "JPEG", quality=85)  # 保存为JPEG格式，质量85%平衡清晰度和体积
-    except:  # 生成失败不报错，跳过
-        pass
-def scan_folder(folder):  # 扫描文件夹主函数
-    conn = sqlite3.connect(DB_PATH)  # 连接数据库
-    c = conn.cursor()  # 创建游标
-    c.execute("DELETE FROM images")  # 清空旧数据，避免重复扫描累加
-    conn.commit()  # 保存清空操作
-    files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]  # 只找常见图片格式
-    print(f"Scanning {len(files)} images...")  # 打印扫描数量
-    with ThreadPoolExecutor(max_workers=4) as executor:  # 启动4个后台线程加速处理
-        for i, path in enumerate(files):  # 遍历每张图片
-            date = get_date_from_path(path)  # 获取日期
-            h = compute_hash(path)  # 计算指纹
-            flags = is_invalid(path)  # 判断是否无效
-            thumb_path = os.path.join(THUMB_DIR, f"{os.path.basename(path)}.thumb.jpg")  # 生成缩略图路径
-            generate_thumb(path, thumb_path)  # 生成缩略图
-            c.execute("INSERT OR IGNORE INTO images (path, date, hash, flags, thumb_path) VALUES (?,?,?,?,?)", (path, date, h, flags, thumb_path))  # 写入数据库，路径重复就跳过
-            if (i+1) % 100 == 0:  # 每处理100张
-                conn.commit()  # 保存一次进度，防止断电丢数据
-                print(f"Processed {i+1}/{len(files)}")  # 打印进度
-    conn.commit()  # 最后保存剩余数据
-    conn.close()  # 关闭数据库
-    print("Scan complete.")  # 打印完成提示
-def move_duplicates():  # 移动重复和无效图片函数
-    conn = sqlite3.connect(DB_PATH)  # 连接数据库
-    c = conn.cursor()  # 创建游标
-    c.execute("SELECT path, hash FROM images WHERE flags='valid'")  # 只查有效图片的指纹
-    rows = c.fetchall()  # 取出数据
-    conn.close()  # 关闭连接
-    groups = {}  # 创建字典用来分组
-    for path, h in rows:  # 遍历每张有效图
-        if h not in groups: groups[h] = []  # 如果指纹没出现过，新建分组
-        groups[h].append(path)  # 把路径加到对应指纹分组里
-    dup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Duplicates")  # 重复图文件夹路径
-    invalid_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Invalid")  # 无效图文件夹路径
-    os.makedirs(dup_dir, exist_ok=True)  # 创建重复图文件夹
-    os.makedirs(invalid_dir, exist_ok=True)  # 创建无效图文件夹
-    moved = 0  # 记录移动数量
-    conn = sqlite3.connect(DB_PATH)  # 重新连接数据库
-    c = conn.cursor()  # 创建游标
-    for h, paths in groups.items():  # 遍历每个指纹分组
-        if len(paths) > 1:  # 如果分组里超过1张图
-            for p in paths[1:]:  # 从第二张开始算重复
-                os.rename(p, os.path.join(dup_dir, os.path.basename(p)))  # 移动到重复文件夹
-                c.execute("UPDATE images SET flags='duplicate' WHERE path=?", (p,))  # 更新数据库状态
-                moved += 1  # 计数器加1
-    c.execute("UPDATE images SET flags='invalid' WHERE flags IN ('blurry','screenshot','meaningless','corrupted')")  # 把所有无效标签统一改为invalid
-    for p in c.execute("SELECT path FROM images WHERE flags='invalid'").fetchall():  # 找出所有无效图路径
-        os.rename(p[0], os.path.join(invalid_dir, os.path.basename(p[0])))  # 移动到无效文件夹
-        moved += 1  # 计数器加1
-    conn.commit()  # 保存所有修改
-    conn.close()  # 关闭数据库
-    print(f"Moved {moved} files.")  # 打印移动总数
+# 导入系统模块
+import os
+import cv2  # OpenCV，用来读取图片
+import hashlib  # 用来计算文件哈希
+import sqlite3
+from datetime import datetime
+from PIL import Image
+import imagehash  # 图片感知哈希，用于查重
+
+# 导入数据库模块
+import db
+
+# 缩略图缓存目录（中文）
+THUMB_DIR = "缩略图缓存"
+
+
+# 确保缩略图目录存在
+def ensure_thumb_dir():
+    if not os.path.exists(THUMB_DIR):
+        os.makedirs(THUMB_DIR)
+
+
+# 计算文件的MD5哈希（用于精确去重）
+def get_file_hash(file_path):
+    """计算文件的MD5值，用于精确判断文件是否相同"""
+    try:
+        with open(file_path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except:
+        return None
+
+
+# 计算图片的感知哈希（用于相似图片去重）
+def get_image_hash(file_path):
+    """计算图片的感知哈希，用于判断图片是否相似（即使尺寸、格式不同）"""
+    try:
+        img = Image.open(file_path)
+        # 转换为灰度图，统一处理
+        img = img.convert("L")
+        # 缩小到8x8，计算感知哈希
+        return str(imagehash.phash(img, hash_size=8))
+    except Exception as e:
+        return None
+
+
+# 生成缩略图
+def generate_thumbnail(file_path):
+    """为图片生成缩略图，用于界面显示"""
+    try:
+        ensure_thumb_dir()
+        # 用文件路径的哈希作为缩略图文件名
+        file_hash = hashlib.md5(file_path.encode()).hexdigest()
+        thumb_path = os.path.join(THUMB_DIR, f"{file_hash}.jpg")
+
+        # 如果缩略图已存在，直接返回路径
+        if os.path.exists(thumb_path):
+            return thumb_path
+
+        # 生成缩略图
+        img = Image.open(file_path)
+        img.thumbnail((200, 200))  # 缩放到200x200以内
+        img.save(thumb_path, "JPEG", quality=85)
+        return thumb_path
+    except Exception as e:
+        return None
+
+
+# 扫描文件夹中的所有图片
+def scan_folder(folder_path):
+    """扫描指定文件夹，提取所有图片信息并存入数据库"""
+    print(f"正在扫描: {folder_path}")
+
+    # 支持的图片格式
+    extensions = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp")
+
+    # 清空旧数据
+    db.clear_images()
+
+    # 遍历文件夹
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            # 检查是否是图片
+            if not file.lower().endswith(extensions):
+                continue
+
+            full_path = os.path.join(root, file)
+
+            try:
+                # 获取文件修改日期
+                mtime = os.path.getmtime(full_path)
+                date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                # 计算文件哈希和图片哈希
+                file_hash = get_file_hash(full_path)
+                img_hash = get_image_hash(full_path)
+
+                # 如果图片无法读取，标记为无效
+                if img_hash is None:
+                    flags = "无效"
+                else:
+                    flags = "有效"
+
+                # 生成缩略图
+                thumb_path = generate_thumbnail(full_path)
+
+                # 保存到数据库（使用完整的哈希值）
+                db.save_image(full_path, file_hash, date_str, flags, thumb_path)
+
+                print(f"  ✓ {file}")
+
+            except Exception as e:
+                print(f"  ✗ {file} - 错误: {e}")
+                continue
+
+    print("扫描完成!")
+
+
+# 移动重复或无效的图片
+def move_duplicates():
+    """找出重复图片和无效图片，移动到子文件夹"""
+    # 获取所有有效图片（有哈希值的）
+    valid_images = db.get_valid_images()
+
+    # 用字典记录已见过的哈希值
+    seen_hashes = {}
+    duplicates = []
+    invalid_files = []
+
+    # 获取所有图片
+    all_images = db.get_images()
+
+    for path, hash_val, date, flags, thumb in all_images:
+        # 如果图片无效，加入待移动列表
+        if flags == "无效":
+            invalid_files.append(path)
+            continue
+
+        # 如果哈希值已存在，说明是重复图片
+        if hash_val in seen_hashes:
+            duplicates.append(path)
+        else:
+            seen_hashes[hash_val] = path
+
+    # 创建目标文件夹（中文目录名）
+    base_dir = os.path.dirname(all_images[0][0]) if all_images else "."
+
+    dup_dir = os.path.join(base_dir, "重复图片")
+    invalid_dir = os.path.join(base_dir, "无效图片")
+
+    os.makedirs(dup_dir, exist_ok=True)
+    os.makedirs(invalid_dir, exist_ok=True)
+
+    # 移动重复图片
+    for file_path in duplicates:
+        try:
+            file_name = os.path.basename(file_path)
+            dest = os.path.join(dup_dir, file_name)
+
+            # 如果目标已存在，加数字后缀
+            counter = 1
+            while os.path.exists(dest):
+                name, ext = os.path.splitext(file_name)
+                dest = os.path.join(dup_dir, f"{name}_{counter}{ext}")
+                counter += 1
+
+            os.rename(file_path, dest)
+            print(f"已移动重复图片: {file_name}")
+        except Exception as e:
+            print(f"移动失败 {file_path}: {e}")
+
+    # 移动无效图片
+    for file_path in invalid_files:
+        try:
+            file_name = os.path.basename(file_path)
+            dest = os.path.join(invalid_dir, file_name)
+
+            counter = 1
+            while os.path.exists(dest):
+                name, ext = os.path.splitext(file_name)
+                dest = os.path.join(invalid_dir, f"{name}_{counter}{ext}")
+                counter += 1
+
+            os.rename(file_path, dest)
+            print(f"已移动无效图片: {file_name}")
+        except Exception as e:
+            print(f"移动失败 {file_path}: {e}")
+
+    print(f"移动完成: 重复图片 {len(duplicates)} 张, 无效图片 {len(invalid_files)} 张")
