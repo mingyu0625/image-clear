@@ -1,34 +1,159 @@
-import sqlite3  # 导入数据库模块，用来存图片信息
-import os  # 导入系统模块，用来处理文件路径
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images.db")  # 数据库文件路径，自动放在程序同级目录
-def init_db():  # 定义初始化数据库的函数
-    conn = sqlite3.connect(DB_PATH)  # 连接数据库文件，不存在就自动创建
-    c = conn.cursor()  # 创建游标对象，用来执行SQL命令
-    c.execute("""  # 开始执行建表语句
-        CREATE TABLE IF NOT EXISTS images (  # 如果表不存在就创建，名字叫images
-            id INTEGER PRIMARY KEY AUTOINCREMENT,  # 自动编号，每张照片唯一标识
-            path TEXT UNIQUE,  # 图片完整路径，不允许重复
-            date TEXT,  # 拍摄或创建日期
-            hash TEXT,  # 图片指纹值，用来查重
-            flags TEXT DEFAULT 'valid',  # 状态标签，默认是有效图片
-            thumb_path TEXT,  # 缩略图路径，加速显示
-            group_id INTEGER  # 分组编号，用来管理重复图
-        )  # 建表语句结束
-    """)  # 执行建表命令
-    c.execute("CREATE INDEX IF NOT EXISTS idx_date ON images(date)")  # 给日期字段建索引，让按时间排序更快
-    c.execute("CREATE INDEX IF NOT EXISTS idx_hash ON images(hash)")  # 给指纹字段建索引，让查重比对更快
-    conn.commit()  # 保存刚才的建表操作
-    conn.close()  # 关闭数据库连接，释放资源
-def get_images():  # 定义获取所有图片信息的函数
-    conn = sqlite3.connect(DB_PATH)  # 连接数据库
-    c = conn.cursor()  # 创建游标
-    c.execute("SELECT path, date, flags, thumb_path FROM images ORDER BY date DESC")  # 按日期倒序查询所有图片信息
-    rows = c.fetchall()  # 把查询结果全部取出来
-    conn.close()  # 关闭连接
-    return rows  # 返回数据给界面用
-def update_flags(path, flags):  # 定义更新图片状态的函数
-    conn = sqlite3.connect(DB_PATH)  # 连接数据库
-    c = conn.cursor()  # 创建游标
-    c.execute("UPDATE images SET flags=? WHERE path=?", (flags, path))  # 根据路径更新状态标签
-    conn.commit()  # 保存修改
-    conn.close()  # 关闭连接
+# 导入 Python 自带的 SQLite 数据库模块
+# 用来保存图片路径、图片哈希等信息
+import sqlite3
+
+
+# 定义数据库文件名字
+# 程序运行后会自动生成 images.db 文件
+DB_NAME = "images.db"
+
+
+# 初始化数据库函数
+# 程序第一次启动时调用，用来创建数据表
+def init_db():
+
+    # 连接 SQLite 数据库
+    # 如果 images.db 不存在，SQLite 会自动创建
+    conn = sqlite3.connect(DB_NAME)
+
+
+    # 创建数据库操作游标
+    # 后续所有 SQL 命令都通过 cursor 执行
+    cursor = conn.cursor()
+
+
+    # 执行创建图片数据表的 SQL
+    # IF NOT EXISTS 表示如果已经存在，就不要重复创建
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS images (
+
+        -- 图片编号，自动增加
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+
+        -- 图片完整路径
+        -- 例如：D:/photo/test.jpg
+        path TEXT UNIQUE,
+
+
+        -- 图片哈希值
+        -- 用来判断两张图片是否相似
+        hash TEXT
+
+    )
+    """)
+
+
+    # 保存数据库修改
+    conn.commit()
+
+
+    # 关闭数据库连接
+    # 防止文件被占用
+    conn.close()
+
+
+
+# 保存一张图片的信息
+# path 是图片路径
+# hash_value 是图片计算出来的哈希
+def save_image(path, hash_value):
+
+
+    # 打开数据库
+    conn = sqlite3.connect(DB_NAME)
+
+
+    # 创建游标
+    cursor = conn.cursor()
+
+
+    # 插入图片数据
+    # 如果路径已经存在，就替换旧数据
+    cursor.execute("""
+    INSERT OR REPLACE INTO images
+    (
+        path,
+        hash
+    )
+    VALUES
+    (
+        ?,
+        ?
+    )
+    """,
+    (
+        path,
+        hash_value
+    ))
+
+
+    # 保存修改
+    conn.commit()
+
+
+    # 关闭数据库
+    conn.close()
+
+
+
+# 获取全部图片数据
+# 返回所有图片路径和哈希
+def get_images():
+
+
+    # 打开数据库
+    conn = sqlite3.connect(DB_NAME)
+
+
+    # 创建游标
+    cursor = conn.cursor()
+
+
+    # 查询全部图片
+    cursor.execute("""
+    SELECT
+        path,
+        hash
+    FROM images
+    """)
+
+
+    # 获取查询结果
+    data = cursor.fetchall()
+
+
+    # 关闭数据库
+    conn.close()
+
+
+    # 返回图片列表
+    return data
+
+
+
+# 删除数据库里的所有图片记录
+# 用于重新扫描
+def clear_images():
+
+
+    # 打开数据库
+    conn = sqlite3.connect(DB_NAME)
+
+
+    # 创建游标
+    cursor = conn.cursor()
+
+
+    # 删除全部记录
+    cursor.execute("""
+    DELETE FROM images
+    """)
+
+
+    # 保存修改
+    conn.commit()
+
+
+    # 关闭数据库
+    conn.close()
